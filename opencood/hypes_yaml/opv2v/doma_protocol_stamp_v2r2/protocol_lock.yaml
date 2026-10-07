@@ -1,0 +1,74 @@
+schema_version: 1
+protocol_name: STAMP_DOMA_V2R2
+status: smoke_only_unresolved_formal_protocol
+
+stamp_commit:
+  status: confirmed
+  value: d9e389f380b32b84895f3f74d80b481326fd7398
+
+doma_commit_or_status:
+  status: local_checkout_only_not_formal_run_verified
+  value: faa096039531fc0875c6a9bf250b9432b4e86a4e
+
+assignment_path: opencood/modality_assign/opv2v_4modality_in_order.json
+assignment_sha256:
+  status: confirmed
+  value: b0d83733eae09c6e69a72d867e6fd8131425f9cd9efb0beff96bbd8ea680ca0e
+
+seed: 303
+agent_order: [m1, m2, m3, m4]
+ego: m1
+mapping:
+  m1: m1
+  m2: m2
+  m3: m3
+  m4: m4
+
+score_threshold: 0.2
+nms_threshold: 0.15
+test_dir: dataset/OPV2V/test
+
+test_manifest_sha256:
+  status: unresolved
+  source: pending_server_dataset_manifest
+  value: null
+
+effective_detection_range:
+  status: unresolved
+  source: pending_server_run_artifact
+  value: null
+
+effective_communication_range:
+  status: unresolved
+  source: pending_server_run_artifact
+  value: null
+
+gt_mode:
+  status: confirmed_from_source
+  value: full_in_range_max_cav_before_use_cav_then_object_id_dedup
+
+ap_sort:
+  status: confirmed_from_source
+  value: per_frame_score_desc_greedy_match_then_global_score_desc_voc_ap
+
+evaluator_sha256:
+  status: confirmed_local_semantics
+  stamp: a10cd0e8a15b3380d7863e865d3f5a1e8a6f7179e7ca3092fa81c6832a5b5e7a
+  doma: b54d8ccdb483f90e9acb2db749c81c1b0aa37816c82d8887014e247b025ad1b
+  semantic_difference: console_precision_only
+
+checkpoint_manifest:
+  status: unresolved
+  source: pending_training
+  local:
+    m1: null
+    m2: null
+    m3: null
+    m4: null
+  protocol_m0: null
+  adapter:
+    m1: null
+    m2: null
+    m3: null
+    m4: null
+  merged: null
