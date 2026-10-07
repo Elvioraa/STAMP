@@ -645,8 +645,8 @@ def _dataset_runtime_imports():
 def _prepare_infer_hypes(hypes, use_cav):
     copied = json.loads(json.dumps(hypes))
     core = copied["fusion"]["core_method"]
-    if not core.endswith("infer"):
-        copied["fusion"]["core_method"] = core + "infer"
+    if core == "intermediateheter":
+        copied["fusion"]["core_method"] = "intermediateheterinfer"
     copied["use_cav"] = use_cav
     return copied
 
