@@ -922,6 +922,8 @@ def check_forward(config_root, lock, max_samples, book):
             require(module is not None, "{} missing {}".format(label, attribute))
 
             def capture(_module, _inputs, output, name=stage_name):
+                if name == "backbone" and isinstance(output, dict):
+                    output = output.get("spatial_features_2d")
                 observed[name] = _shape_of(output)
 
             handles.append(module.register_forward_hook(capture))
@@ -935,13 +937,32 @@ def check_forward(config_root, lock, max_samples, book):
         expected_stages = ["encoder", "backbone", "aligner", "adapter"]
         if use_cav > 1:
             expected_stages.append("reverter")
+        model_setting = hypes["model"]["args"][modality]
+        adapter_args = model_setting["adapter"]["args"]
+        reverter_args = model_setting["reverter"]["args"]
+        stage_contracts = {
+            "adapter": (adapter_args["out_channels"],) + tuple(adapter_args["out_feature_shape"]),
+            "reverter": (reverter_args["out_channels"],) + tuple(reverter_args["out_feature_shape"]),
+        }
         for stage_name in expected_stages:
             shape = observed.get(stage_name)
             require(shape is not None, "{} did not capture {} shape".format(label, stage_name))
-            if len(shape) >= 4 and stage_name != "encoder":
-                require(shape[1] == 64, "{} {} channel != 64: {}".format(label, stage_name, shape))
-            if stage_name in ("adapter", "reverter"):
-                require(shape[-2:] == (256, 256), "{} {} spatial mismatch: {}".format(label, stage_name, shape))
+            require(
+                len(shape) == 4 and all(dimension > 0 for dimension in shape),
+                "{} {} must be a non-empty BCHW tensor: {}".format(label, stage_name, shape),
+            )
+            if stage_name == "aligner":
+                require(
+                    shape[1] == adapter_args["in_channels"],
+                    "{} aligner channel does not match adapter input: {}".format(label, shape),
+                )
+            if stage_name in stage_contracts:
+                require(
+                    shape[1:] == stage_contracts[stage_name],
+                    "{} {} contract mismatch: expected {}, got {}".format(
+                        label, stage_name, stage_contracts[stage_name], shape[1:]
+                    ),
+                )
         print("[PASS] {} {} shapes={}".format(label, modality, observed))
     book.passed("Gate 5 completed available five-point forward checks")
 
