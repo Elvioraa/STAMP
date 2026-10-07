@@ -8,6 +8,7 @@ local machine lacks the dataset, CUDA, a dependency, or cached camera weights.
 from __future__ import print_function
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -642,11 +643,79 @@ def _dataset_runtime_imports():
     return build_dataset
 
 
+def _load_runtime_hypes(config_root, label):
+    """Load one config through STAMP's official runtime YAML pipeline."""
+    require(label in MODEL_CONFIGS, "unknown runtime config label: {}".format(label))
+    path = config_root / MODEL_CONFIGS[label]
+    require(path.is_file(), "runtime config does not exist: {}".format(path))
+    try:
+        from opencood.hypes_yaml import yaml_utils
+        hypes = yaml_utils.load_yaml(str(path))
+    except Exception as exc:
+        raise CheckFailure(
+            "{} official runtime YAML load failed: {}".format(label, exc)
+        )
+    require(isinstance(hypes, dict), "{} runtime YAML is not a mapping".format(label))
+    return hypes
+
+
+def _validate_final_runtime_hypes(hypes, lock, gate, book):
+    """Verify official parser output and the read-only test-split override."""
+    require(
+        hypes.get("heter", {}).get("assignment_path") == EXPECTED_ASSIGNMENT,
+        "{} FINAL runtime assignment mismatch".format(gate),
+    )
+    require(
+        hypes.get("test_dir") == lock["test_dir"],
+        "{} FINAL runtime test_dir does not match protocol lock".format(gate),
+    )
+    modality_setting = hypes.get("heter", {}).get("modality_setting", {})
+    required_modalities = ["m0"] + AGENT_ORDER
+    require(
+        all(modality in modality_setting for modality in required_modalities),
+        "{} FINAL runtime modality_setting is incomplete".format(gate),
+    )
+    resolved = []
+    required_anchor_keys = {"W", "H", "D", "vw", "vh", "vd"}
+    for modality in required_modalities:
+        postprocess = modality_setting[modality].get("postprocess", {})
+        if postprocess.get("core_method") != "VoxelPostprocessor":
+            continue
+        anchor_args = postprocess.get("anchor_args", {})
+        missing = sorted(required_anchor_keys.difference(anchor_args))
+        require(
+            not missing,
+            "{} FINAL runtime {} anchor_args missing {}".format(
+                gate, modality, ", ".join(missing)
+            ),
+        )
+        resolved.append(modality)
+    require(resolved, "{} FINAL runtime has no VoxelPostprocessor anchors".format(gate))
+
+    original_validate_dir = hypes.get("validate_dir")
+    prepared = _prepare_infer_hypes(hypes, 1)
+    require(
+        prepared.get("validate_dir") == prepared.get("test_dir"),
+        "{} inference runtime did not redirect validate_dir to test_dir".format(gate),
+    )
+    require(
+        hypes.get("validate_dir") == original_validate_dir,
+        "{} inference preparation mutated the loaded base config".format(gate),
+    )
+    book.passed(
+        "{} FINAL loaded via yaml_utils.load_yaml with resolved anchors for {}".format(
+            gate, ",".join(resolved)
+        )
+    )
+    book.passed("{} runtime validate_dir redirected to test_dir".format(gate))
+
+
 def _prepare_infer_hypes(hypes, use_cav):
-    copied = json.loads(json.dumps(hypes))
+    copied = copy.deepcopy(hypes)
     core = copied["fusion"]["core_method"]
     if core == "intermediateheter":
         copied["fusion"]["core_method"] = "intermediateheterinfer"
+    copied["validate_dir"] = copied["test_dir"]
     copied["use_cav"] = use_cav
     return copied
 
@@ -698,8 +767,10 @@ def _gt_hash(item):
     return digest.hexdigest()
 
 
-def check_dataset(config_root, parsed, lock, max_samples, book):
-    test_dir = resolve_repo_path(lock["test_dir"])
+def check_dataset(config_root, lock, max_samples, book):
+    runtime_final = _load_runtime_hypes(config_root, "FINAL")
+    _validate_final_runtime_hypes(runtime_final, lock, "Gate 4", book)
+    test_dir = resolve_repo_path(runtime_final["test_dir"])
     if not test_dir.is_dir():
         book.skipped("Gate 4 dataset is absent: {}".format(test_dir))
         book.pending_server("Gate 4 real single-batch source-path checks")
@@ -720,7 +791,7 @@ def check_dataset(config_root, parsed, lock, max_samples, book):
     sample_count = None
     for use_cav in range(1, 5):
         try:
-            hypes = _prepare_infer_hypes(parsed["FINAL"], use_cav)
+            hypes = _prepare_infer_hypes(runtime_final, use_cav)
             dataset = build_dataset(hypes, visualize=False, train=False)
         except Exception as exc:
             if _environment_exception(exc):
@@ -789,8 +860,10 @@ def _shape_of(value):
     return None
 
 
-def check_forward(config_root, parsed, lock, max_samples, book):
-    test_dir = resolve_repo_path(lock["test_dir"])
+def check_forward(config_root, lock, max_samples, book):
+    runtime_final = _load_runtime_hypes(config_root, "FINAL")
+    _validate_final_runtime_hypes(runtime_final, lock, "Gate 5", book)
+    test_dir = resolve_repo_path(runtime_final["test_dir"])
     if not test_dir.is_dir():
         book.skipped("Gate 5 dataset is absent: {}".format(test_dir))
         book.pending_server("Gate 5 five-point feature-shape forward checks")
@@ -815,9 +888,9 @@ def check_forward(config_root, parsed, lock, max_samples, book):
         book.pending_server("Gate 5 camera-inclusive forward checks")
         return
 
-    for index, modality in enumerate(AGENT_ORDER, start=1):
-        label = "A{}".format(index)
-        hypes = parsed[label]
+    for use_cav, modality in enumerate(AGENT_ORDER, start=1):
+        label = "FINAL-CAV{}".format(use_cav)
+        hypes = _prepare_infer_hypes(runtime_final, use_cav)
         try:
             dataset = build_dataset(hypes, visualize=False, train=False)
             loader = DataLoader(
@@ -883,9 +956,9 @@ def main():
         if args.stage in ("model", "all"):
             check_model(config_root, parsed, book)
         if args.stage in ("dataset", "all"):
-            check_dataset(config_root, parsed, lock, args.max_samples, book)
+            check_dataset(config_root, lock, args.max_samples, book)
         if args.stage in ("forward", "all"):
-            check_forward(config_root, parsed, lock, args.max_samples, book)
+            check_forward(config_root, lock, args.max_samples, book)
     except CheckFailure as exc:
         book.failed(str(exc))
     except Exception as exc:
