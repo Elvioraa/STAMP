@@ -932,7 +932,10 @@ def check_forward(config_root, lock, max_samples, book):
         finally:
             for handle in handles:
                 handle.remove()
-        for stage_name in ("encoder", "backbone", "aligner", "adapter", "reverter"):
+        expected_stages = ["encoder", "backbone", "aligner", "adapter"]
+        if use_cav > 1:
+            expected_stages.append("reverter")
+        for stage_name in expected_stages:
             shape = observed.get(stage_name)
             require(shape is not None, "{} did not capture {} shape".format(label, stage_name))
             if len(shape) >= 4 and stage_name != "encoder":
