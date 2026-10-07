@@ -892,7 +892,7 @@ def check_forward(config_root, lock, max_samples, book):
         label = "FINAL-CAV{}".format(use_cav)
         hypes = _prepare_infer_hypes(runtime_final, use_cav)
         try:
-            dataset = build_dataset(hypes, visualize=False, train=False)
+            dataset = build_dataset(hypes, visualize=True, train=False)
             loader = DataLoader(
                 dataset,
                 batch_size=1,
