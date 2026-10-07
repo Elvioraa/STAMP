@@ -746,6 +746,55 @@ def _sample_source_records(dataset, index):
     return records
 
 
+def _sample_valid_modalities(dataset, index):
+    """Return the ordered modalities that survive the dataset's CAV filters."""
+    from opencood.hypes_yaml import yaml_utils
+
+    scenario_index = 0
+    for position, end_index in enumerate(dataset.len_record):
+        if index < end_index:
+            scenario_index = position
+            break
+    scenario = dataset.scenario_database[scenario_index]
+    local_index = index if scenario_index == 0 else index - dataset.len_record[scenario_index - 1]
+    timestamp = dataset.return_timestamp_key(scenario, local_index)
+
+    params_by_cav = {}
+    ego_cav_id = None
+    for cav_id, cav_content in scenario.items():
+        yaml_path = str(cav_content[timestamp]["yaml"])
+        json_path = Path(yaml_path.replace("yaml", "json"))
+        if json_path.is_file():
+            with json_path.open("r", encoding="utf-8") as stream:
+                params_by_cav[cav_id] = json.load(stream)
+        else:
+            params_by_cav[cav_id] = yaml_utils.load_yaml(yaml_path)
+        if cav_content["ego"]:
+            ego_cav_id = cav_id
+
+    require(ego_cav_id is not None, "Gate 5 sample {} has no ego CAV".format(index))
+    ego_pose = params_by_cav[ego_cav_id]["lidar_pose"]
+    modalities = []
+    for cav_id, cav_content in scenario.items():
+        pose = params_by_cav[cav_id]["lidar_pose"]
+        distance = ((pose[0] - ego_pose[0]) ** 2 + (pose[1] - ego_pose[1]) ** 2) ** 0.5
+        modality = cav_content[timestamp].get("modality_name")
+        if distance > dataset.params["comm_range"] or dataset.adaptor.unmatched_modality(modality):
+            continue
+        modalities.append(modality)
+    return modalities
+
+
+def _find_gate5_progressive_sample(dataset):
+    for index in range(len(dataset)):
+        if _sample_valid_modalities(dataset, index)[: len(AGENT_ORDER)] != AGENT_ORDER:
+            continue
+        item = dataset[index]
+        if item is not None and item["ego"].get("agent_modality_list") == AGENT_ORDER:
+            return index
+    return None
+
+
 def _hash_records(records):
     payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -870,7 +919,6 @@ def check_forward(config_root, lock, max_samples, book):
         return
     try:
         import torch
-        from torch.utils.data import DataLoader
         from opencood.data_utils.datasets import build_dataset
         from opencood.tools import train_utils
     except Exception as exc:
@@ -888,21 +936,71 @@ def check_forward(config_root, lock, max_samples, book):
         book.pending_server("Gate 5 camera-inclusive forward checks")
         return
 
+    try:
+        selection_hypes = _prepare_infer_hypes(runtime_final, len(AGENT_ORDER))
+        selection_dataset = build_dataset(selection_hypes, visualize=True, train=False)
+        target_idx = _find_gate5_progressive_sample(selection_dataset)
+    except Exception as exc:
+        if _environment_exception(exc):
+            book.skipped("Gate 5 progressive sample selection unavailable: {}".format(exc))
+            book.pending_server("Gate 5 progressive sample selection")
+            return
+        raise
+    require(
+        target_idx is not None,
+        "Gate 5 could not find a sample with m1->m2->m3->m4 valid prefix",
+    )
+
     for use_cav, modality in enumerate(AGENT_ORDER, start=1):
         label = "FINAL-CAV{}".format(use_cav)
         hypes = _prepare_infer_hypes(runtime_final, use_cav)
         try:
-            dataset = build_dataset(hypes, visualize=True, train=False)
-            loader = DataLoader(
-                dataset,
-                batch_size=1,
-                num_workers=0,
-                collate_fn=dataset.collate_batch_train,
-                shuffle=False,
-                drop_last=False,
+            dataset = (
+                selection_dataset
+                if use_cav == len(AGENT_ORDER)
+                else build_dataset(hypes, visualize=True, train=False)
             )
-            batch = next(iter(loader))
-            require(batch is not None, "{} first batch is None".format(label))
+            item = dataset[target_idx]
+            require(item is not None, "{} sample {} is None".format(label, target_idx))
+            ego = item["ego"]
+            require(
+                ego.get("sample_idx") == target_idx,
+                "{} returned sample_idx {} instead of {}".format(
+                    label, ego.get("sample_idx"), target_idx
+                ),
+            )
+            expected_prefix = AGENT_ORDER[:use_cav]
+            actual_prefix = ego.get("agent_modality_list")
+            require(
+                actual_prefix == expected_prefix,
+                "{} sample {} expected {}, got {}".format(
+                    label, target_idx, expected_prefix, actual_prefix
+                ),
+            )
+            require(
+                ego.get("cav_num") == len(expected_prefix),
+                "{} sample {} cav_num mismatch: expected {}, got {}".format(
+                    label, target_idx, len(expected_prefix), ego.get("cav_num")
+                ),
+            )
+            require(
+                len(ego.get("cav_id_list", [])) == len(expected_prefix),
+                "{} sample {} cav_id_list length mismatch".format(label, target_idx),
+            )
+            batch = dataset.collate_batch_train([item])
+            require(batch is not None, "{} sample {} batch is None".format(label, target_idx))
+            record_len = batch["ego"]["record_len"].detach().cpu().tolist()
+            require(
+                record_len == [len(expected_prefix)],
+                "{} sample {} record_len mismatch: expected {}, got {}".format(
+                    label, target_idx, [len(expected_prefix)], record_len
+                ),
+            )
+            print(
+                "[INFO] {} sample={} modalities={} cav_ids={} record_len={}".format(
+                    label, target_idx, actual_prefix, ego.get("cav_id_list"), record_len
+                )
+            )
             model = train_utils.create_model(hypes).cuda().eval()
         except Exception as exc:
             if _environment_exception(exc):
