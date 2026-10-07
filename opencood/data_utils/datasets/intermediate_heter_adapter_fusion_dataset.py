@@ -57,6 +57,12 @@ def getIntermediateheteradapterFusionDataset(cls):
     class IntermediateheteradapterFusionDataset(cls):
         def __init__(self, params, visualize, train=True):
             super().__init__(params, visualize, train)
+            self.use_cav = params.get("use_cav", None)
+            if self.use_cav is not None:
+                if type(self.use_cav) is not int:
+                    raise TypeError("use_cav must be an int")
+                if self.use_cav < 1 or self.use_cav > self.max_cav:
+                    raise ValueError("use_cav must be between 1 and max_cav")
             # intermediate and supervise single
             self.supervise_single = (
                 True
@@ -572,11 +578,16 @@ def getIntermediateheteradapterFusionDataset(cls):
 
             pairwise_t_matrix = get_pairwise_transformation(base_data_dict, self.max_cav, self.proj_first)
 
+            if self.use_cav is None:
+                input_cav_id_list = cav_id_list
+            else:
+                input_cav_id_list = cav_id_list[: self.use_cav]
             lidar_poses = np.array(lidar_pose_list).reshape(-1, 6)  # [N_cav, 6]
             lidar_poses_clean = np.array(lidar_pose_clean_list).reshape(-1, 6)  # [N_cav, 6]
 
             # merge preprocessed features from different cavs into the same dict
-            cav_num = len(cav_id_list)
+            if self.use_cav is None:
+                cav_num = len(cav_id_list)
             protocol_sensor_type = self.sensor_type_dict["m0"]
             for modality_name in self.modality_name_list:
                 exec(f"label_dict_list_{modality_name} = []")
@@ -615,12 +626,23 @@ def getIntermediateheteradapterFusionDataset(cls):
                 else:
                     self.generate_object_center = self.generate_object_center_lidar
 
+                if self.use_cav is not None:
+                    object_bbx_center_gt, object_bbx_mask_gt, object_ids_gt = self.generate_object_center(
+                        [selected_cav_base], ego_cav_base["params"]["lidar_pose_clean"]
+                    )
+                    object_stack.append(object_bbx_center_gt[object_bbx_mask_gt == 1])
+                    object_id_stack += object_ids_gt
+
+                    if _i >= self.use_cav:
+                        continue
+
                 selected_cav_processed = self.get_item_single_car(selected_cav_base, ego_cav_base)
 
                 transformation_matrix_list.append(selected_cav_processed["transformation_matrix"])
                 transformation_matrix_clean_list.append(selected_cav_processed["transformation_matrix_clean"])
-                object_stack.append(selected_cav_processed["object_bbx_center"])
-                object_id_stack += selected_cav_processed["object_ids"]
+                if self.use_cav is None:
+                    object_stack.append(selected_cav_processed["object_bbx_center"])
+                    object_id_stack += selected_cav_processed["object_ids"]
                 eval(f"label_dict_list_{modality_name}").append(selected_cav_processed["single_label_dict"])
                 if sensor_type == "lidar":
                     eval(f"input_list_{modality_name}").append(
@@ -663,6 +685,10 @@ def getIntermediateheteradapterFusionDataset(cls):
                     single_label_list.append(selected_cav_processed["single_label_dict"])
                     single_object_bbx_center_list.append(selected_cav_processed["single_object_bbx_center"])
                     single_object_bbx_mask_list.append(selected_cav_processed["single_object_bbx_mask"])
+
+            if self.use_cav is not None:
+                cav_num = len(agent_modality_list)
+                assert cav_num == len(input_cav_id_list)
 
             # generate single view GT label
             if self.supervise_single and self.heterogeneous:
@@ -845,7 +871,7 @@ def getIntermediateheteradapterFusionDataset(cls):
                     }
                 )
 
-            processed_data_dict["ego"].update({"sample_idx": idx, "cav_id_list": cav_id_list})
+            processed_data_dict["ego"].update({"sample_idx": idx, "cav_id_list": input_cav_id_list})
 
             return processed_data_dict
 
