@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -44,9 +45,7 @@ MODEL_CONFIGS = OrderedDict(
 )
 ALL_CONFIGS = list(MODEL_CONFIGS.values()) + ["protocol_lock.yaml"]
 EXPECTED_ASSIGNMENT = "opencood/modality_assign/opv2v_4modality_in_order.json"
-EXPECTED_ASSIGNMENT_SHA256 = (
-    "b0d83733eae09c6e69a72d867e6fd8131425f9cd9efb0beff96bbd8ea680ca0e"
-)
+EXPECTED_ASSIGNMENT_GIT_BLOB = "61489d9fa23faef35548f8f73a48c7238c21a7ef"
 AGENT_ORDER = ["m1", "m2", "m3", "m4"]
 PHYSICAL_AGENT = {
     "m1": ("lidar", "point_pillar", None),
@@ -113,6 +112,31 @@ def sha256_file(path):
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def git_output(*args):
+    """Run a read-only Git query at the repository root."""
+    command = [
+        "git",
+        "-c",
+        "safe.directory={}".format(REPO_ROOT.as_posix()),
+    ] + list(args)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+    except OSError as exc:
+        raise CheckFailure("unable to run Git: {}".format(exc))
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise CheckFailure(
+            "Git query failed ({}): {}".format(" ".join(args), detail)
+        )
+    return result.stdout.strip()
 
 
 def strict_load_yaml(path):
@@ -275,6 +299,7 @@ def check_protocol_lock(config_root, formal, book):
         "stamp_commit",
         "doma_commit_or_status",
         "assignment_path",
+        "assignment_git_blob",
         "assignment_sha256",
         "seed",
         "agent_order",
@@ -298,10 +323,24 @@ def check_protocol_lock(config_root, formal, book):
     require(lock["ego"] == "m1", "protocol_lock ego must be m1")
     require(lock["mapping"] == dict((m, m) for m in AGENT_ORDER), "protocol_lock mapping mismatch")
     require(lock["assignment_path"] == EXPECTED_ASSIGNMENT, "protocol_lock assignment path mismatch")
+    assignment_blob = lock["assignment_git_blob"]
     require(
-        lock["assignment_sha256"].get("value", "").lower()
-        == EXPECTED_ASSIGNMENT_SHA256,
-        "protocol_lock assignment SHA256 mismatch",
+        assignment_blob.get("status") == "confirmed",
+        "protocol_lock assignment_git_blob must be confirmed",
+    )
+    require(
+        assignment_blob.get("value", "").lower() == EXPECTED_ASSIGNMENT_GIT_BLOB,
+        "protocol_lock assignment_git_blob mismatch",
+    )
+    assignment_sha = lock["assignment_sha256"]
+    require(
+        assignment_sha.get("status") == "informational"
+        and assignment_sha.get("hash_scope") == "windows_worktree_raw",
+        "protocol_lock assignment_sha256 must be informational Windows raw bytes",
+    )
+    require(
+        len(assignment_sha.get("value", "")) == 64,
+        "protocol_lock informational assignment_sha256 is malformed",
     )
     unresolved = []
     for key in ("effective_detection_range", "effective_communication_range"):
@@ -328,10 +367,43 @@ def check_protocol_lock(config_root, formal, book):
 
 
 def check_assignment(lock, book):
-    assignment_path = resolve_repo_path(lock["assignment_path"])
+    assignment_relative = lock["assignment_path"]
+    assignment_path = resolve_repo_path(assignment_relative)
     require(assignment_path.is_file(), "assignment file does not exist: {}".format(assignment_path))
-    actual_sha = sha256_file(assignment_path)
-    require(actual_sha == EXPECTED_ASSIGNMENT_SHA256, "assignment SHA256 changed")
+
+    tracked = git_output("ls-files", "--error-unmatch", "--", assignment_relative)
+    git_status = git_output("status", "--porcelain=v1", "--", assignment_relative)
+    head_blob = git_output("rev-parse", "HEAD:{}".format(assignment_relative)).lower()
+    worktree_blob = git_output("hash-object", "--", assignment_relative).lower()
+    raw_sha = sha256_file(assignment_path)
+    locked_blob = lock["assignment_git_blob"]["value"].lower()
+    locked_raw = lock["assignment_sha256"]["value"].lower()
+
+    print("[INFO] assignment HEAD blob: {}".format(head_blob))
+    print("[INFO] assignment worktree blob: {}".format(worktree_blob))
+    print(
+        "[INFO] assignment raw SHA256 (informational, current worktree): {}".format(
+            raw_sha
+        )
+    )
+    print(
+        "[INFO] assignment raw SHA256 lock (informational, windows_worktree_raw): {}".format(
+            locked_raw
+        )
+    )
+    print("[INFO] assignment git status: {}".format(git_status or "clean"))
+
+    tracked_paths = [line.replace("\\", "/") for line in tracked.splitlines()]
+    require(
+        assignment_relative in tracked_paths,
+        "assignment file is not tracked by Git",
+    )
+    require(not git_status, "assignment working tree is modified: {}".format(git_status))
+    require(head_blob == locked_blob, "assignment HEAD blob does not match protocol lock")
+    require(
+        worktree_blob == head_blob,
+        "assignment worktree blob does not match HEAD blob",
+    )
     with assignment_path.open("r", encoding="utf-8") as stream:
         assignment = json.load(stream, object_pairs_hook=OrderedDict)
     require(assignment, "assignment JSON is empty")
@@ -351,9 +423,8 @@ def check_assignment(lock, book):
         "internal CAV prefix definition mismatch",
     )
     book.passed(
-        "assignment SHA256 and m1->m2->m3->m4 prefixes across {} scenarios".format(
-            checked
-        )
+        "assignment tracked/clean Git blob identity and m1->m2->m3->m4 prefixes "
+        "across {} scenarios".format(checked)
     )
 
 

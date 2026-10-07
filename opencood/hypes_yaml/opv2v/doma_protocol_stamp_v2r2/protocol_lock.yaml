@@ -11,8 +11,12 @@ doma_commit_or_status:
   value: faa096039531fc0875c6a9bf250b9432b4e86a4e
 
 assignment_path: opencood/modality_assign/opv2v_4modality_in_order.json
-assignment_sha256:
+assignment_git_blob:
   status: confirmed
+  value: 61489d9fa23faef35548f8f73a48c7238c21a7ef
+assignment_sha256:
+  status: informational
+  hash_scope: windows_worktree_raw
   value: b0d83733eae09c6e69a72d867e6fd8131425f9cd9efb0beff96bbd8ea680ca0e
 
 seed: 303
