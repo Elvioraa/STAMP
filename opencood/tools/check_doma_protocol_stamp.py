@@ -45,8 +45,8 @@ MODEL_CONFIGS = OrderedDict(
     ]
 )
 ALL_CONFIGS = list(MODEL_CONFIGS.values()) + ["protocol_lock.yaml"]
-EXPECTED_ASSIGNMENT = "opencood/modality_assign/opv2v_4modality_in_order.json"
-EXPECTED_ASSIGNMENT_GIT_BLOB = "61489d9fa23faef35548f8f73a48c7238c21a7ef"
+EXPECTED_TRAINING_ASSIGNMENT = "opencood/modality_assign/opv2v_4modality.json"
+EXPECTED_FINAL_ASSIGNMENT = "opencood/modality_assign/opv2v_4modality_in_order.json"
 AGENT_ORDER = ["m1", "m2", "m3", "m4"]
 PHYSICAL_AGENT = {
     "m1": ("lidar", "point_pillar", None),
@@ -299,9 +299,8 @@ def check_protocol_lock(config_root, formal, book):
     required = [
         "stamp_commit",
         "doma_commit_or_status",
-        "assignment_path",
-        "assignment_git_blob",
-        "assignment_sha256",
+        "training_assignment",
+        "final_assignment",
         "seed",
         "agent_order",
         "ego",
@@ -319,30 +318,45 @@ def check_protocol_lock(config_root, formal, book):
     ]
     for key in required:
         require(key in lock, "protocol_lock missing {}".format(key))
+    require(lock.get("schema_version") == 2, "protocol_lock schema_version must be 2")
     require(lock["seed"] == 303, "protocol_lock seed must be 303")
     require(lock["agent_order"] == AGENT_ORDER, "protocol_lock agent_order mismatch")
     require(lock["ego"] == "m1", "protocol_lock ego must be m1")
     require(lock["mapping"] == dict((m, m) for m in AGENT_ORDER), "protocol_lock mapping mismatch")
-    require(lock["assignment_path"] == EXPECTED_ASSIGNMENT, "protocol_lock assignment path mismatch")
-    assignment_blob = lock["assignment_git_blob"]
-    require(
-        assignment_blob.get("status") == "confirmed",
-        "protocol_lock assignment_git_blob must be confirmed",
+    assignment_specs = (
+        ("training", lock["training_assignment"], EXPECTED_TRAINING_ASSIGNMENT),
+        ("final", lock["final_assignment"], EXPECTED_FINAL_ASSIGNMENT),
     )
-    require(
-        assignment_blob.get("value", "").lower() == EXPECTED_ASSIGNMENT_GIT_BLOB,
-        "protocol_lock assignment_git_blob mismatch",
-    )
-    assignment_sha = lock["assignment_sha256"]
-    require(
-        assignment_sha.get("status") == "informational"
-        and assignment_sha.get("hash_scope") == "windows_worktree_raw",
-        "protocol_lock assignment_sha256 must be informational Windows raw bytes",
-    )
-    require(
-        len(assignment_sha.get("value", "")) == 64,
-        "protocol_lock informational assignment_sha256 is malformed",
-    )
+    for name, assignment_spec, expected_path in assignment_specs:
+        require(isinstance(assignment_spec, dict), "protocol_lock {}_assignment must be a mapping".format(name))
+        for key in ("path", "git_blob", "sha256"):
+            require(
+                key in assignment_spec,
+                "protocol_lock {}_assignment missing {}".format(name, key),
+            )
+        require(
+            assignment_spec["path"] == expected_path,
+            "protocol_lock {} assignment path mismatch".format(name),
+        )
+        assignment_blob = assignment_spec["git_blob"]
+        require(
+            assignment_blob.get("status") == "confirmed",
+            "protocol_lock {} assignment git_blob must be confirmed".format(name),
+        )
+        require(
+            len(assignment_blob.get("value", "")) == 40,
+            "protocol_lock {} assignment git_blob is malformed".format(name),
+        )
+        assignment_sha = assignment_spec["sha256"]
+        require(
+            assignment_sha.get("status") == "informational"
+            and assignment_sha.get("hash_scope") == "windows_worktree_raw",
+            "protocol_lock {} assignment sha256 must be informational Windows raw bytes".format(name),
+        )
+        require(
+            len(assignment_sha.get("value", "")) == 64,
+            "protocol_lock informational {} assignment sha256 is malformed".format(name),
+        )
     unresolved = []
     for key in ("effective_detection_range", "effective_communication_range"):
         value = lock[key]
@@ -367,66 +381,73 @@ def check_protocol_lock(config_root, formal, book):
     return lock
 
 
-def check_assignment(lock, book):
-    assignment_relative = lock["assignment_path"]
+def check_assignment(name, assignment_spec, check_prefix_order=False):
+    assignment_relative = assignment_spec["path"]
     assignment_path = resolve_repo_path(assignment_relative)
-    require(assignment_path.is_file(), "assignment file does not exist: {}".format(assignment_path))
+    require(
+        assignment_path.is_file(),
+        "{} assignment file does not exist: {}".format(name, assignment_path),
+    )
 
     tracked = git_output("ls-files", "--error-unmatch", "--", assignment_relative)
     git_status = git_output("status", "--porcelain=v1", "--", assignment_relative)
     head_blob = git_output("rev-parse", "HEAD:{}".format(assignment_relative)).lower()
     worktree_blob = git_output("hash-object", "--", assignment_relative).lower()
     raw_sha = sha256_file(assignment_path)
-    locked_blob = lock["assignment_git_blob"]["value"].lower()
-    locked_raw = lock["assignment_sha256"]["value"].lower()
+    locked_blob = assignment_spec["git_blob"]["value"].lower()
+    locked_raw = assignment_spec["sha256"]["value"].lower()
 
-    print("[INFO] assignment HEAD blob: {}".format(head_blob))
-    print("[INFO] assignment worktree blob: {}".format(worktree_blob))
+    print("[INFO] {} assignment HEAD blob: {}".format(name, head_blob))
+    print("[INFO] {} assignment worktree blob: {}".format(name, worktree_blob))
     print(
-        "[INFO] assignment raw SHA256 (informational, current worktree): {}".format(
-            raw_sha
+        "[INFO] {} assignment raw SHA256 (informational, current worktree): {}".format(
+            name, raw_sha
         )
     )
     print(
-        "[INFO] assignment raw SHA256 lock (informational, windows_worktree_raw): {}".format(
-            locked_raw
+        "[INFO] {} assignment raw SHA256 lock (informational, windows_worktree_raw): {}".format(
+            name, locked_raw
         )
     )
-    print("[INFO] assignment git status: {}".format(git_status or "clean"))
+    print("[INFO] {} assignment git status: {}".format(name, git_status or "clean"))
 
     tracked_paths = [line.replace("\\", "/") for line in tracked.splitlines()]
     require(
         assignment_relative in tracked_paths,
-        "assignment file is not tracked by Git",
+        "{} assignment file is not tracked by Git".format(name),
     )
-    require(not git_status, "assignment working tree is modified: {}".format(git_status))
-    require(head_blob == locked_blob, "assignment HEAD blob does not match protocol lock")
+    require(
+        not git_status,
+        "{} assignment working tree is modified: {}".format(name, git_status),
+    )
+    require(
+        head_blob == locked_blob,
+        "{} assignment HEAD blob does not match protocol lock".format(name),
+    )
     require(
         worktree_blob == head_blob,
-        "assignment worktree blob does not match HEAD blob",
+        "{} assignment worktree blob does not match HEAD blob".format(name),
     )
     with assignment_path.open("r", encoding="utf-8") as stream:
         assignment = json.load(stream, object_pairs_hook=OrderedDict)
     require(assignment, "assignment JSON is empty")
-    checked = 0
-    for scenario, cav_mapping in assignment.items():
-        modalities = list(cav_mapping.values())
-        prefix_len = min(4, len(modalities))
+    if check_prefix_order:
+        for scenario, cav_mapping in assignment.items():
+            modalities = list(cav_mapping.values())
+            prefix_len = min(4, len(modalities))
+            require(
+                modalities[:prefix_len] == AGENT_ORDER[:prefix_len],
+                "{} assignment order mismatch in {}: {}".format(
+                    name, scenario, modalities[:prefix_len]
+                ),
+            )
+        expected_prefixes = [AGENT_ORDER[:n] for n in range(1, 5)]
         require(
-            modalities[:prefix_len] == AGENT_ORDER[:prefix_len],
-            "assignment order mismatch in {}: {}".format(scenario, modalities[:prefix_len]),
+            expected_prefixes
+            == [["m1"], ["m1", "m2"], ["m1", "m2", "m3"], AGENT_ORDER],
+            "internal CAV prefix definition mismatch",
         )
-        checked += 1
-    expected_prefixes = [AGENT_ORDER[:n] for n in range(1, 5)]
-    require(
-        expected_prefixes
-        == [["m1"], ["m1", "m2"], ["m1", "m2", "m3"], AGENT_ORDER],
-        "internal CAV prefix definition mismatch",
-    )
-    book.passed(
-        "assignment tracked/clean Git blob identity and m1->m2->m3->m4 prefixes "
-        "across {} scenarios".format(checked)
-    )
+    return len(assignment)
 
 
 def check_yaml(config_root, formal, book):
@@ -436,7 +457,21 @@ def check_yaml(config_root, formal, book):
     for label, path in config_paths(config_root).items():
         parsed[label] = strict_load_yaml(path)
     lock = check_protocol_lock(config_root, formal, book)
-    check_assignment(lock, book)
+    training_scenarios = check_assignment(
+        "training", lock["training_assignment"], check_prefix_order=False
+    )
+    final_scenarios = check_assignment(
+        "final", lock["final_assignment"], check_prefix_order=True
+    )
+    book.passed(
+        "training assignment tracked/clean Git blob identity across {} scenarios".format(
+            training_scenarios
+        )
+    )
+    book.passed(
+        "final assignment tracked/clean Git blob identity and m1->m2->m3->m4 prefixes "
+        "across {} scenarios".format(final_scenarios)
+    )
 
     for label, hypes in parsed.items():
         require(hypes.get("seed") == 303, "{} seed must be 303".format(label))
@@ -444,9 +479,12 @@ def check_yaml(config_root, formal, book):
             hypes.get("train_params", {}).get("max_cav") == 5,
             "{} max_cav must be 5".format(label),
         )
+        expected_assignment = (
+            EXPECTED_FINAL_ASSIGNMENT if label == "FINAL" else EXPECTED_TRAINING_ASSIGNMENT
+        )
         require(
-            hypes.get("heter", {}).get("assignment_path") == EXPECTED_ASSIGNMENT,
-            "{} must reuse the checked in-order assignment".format(label),
+            hypes.get("heter", {}).get("assignment_path") == expected_assignment,
+            "{} assignment path mismatch".format(label),
         )
         _assert_thresholds(hypes, label)
         _assert_no_doma_model(hypes, label)
@@ -662,7 +700,7 @@ def _load_runtime_hypes(config_root, label):
 def _validate_final_runtime_hypes(hypes, lock, gate, book):
     """Verify official parser output and the read-only test-split override."""
     require(
-        hypes.get("heter", {}).get("assignment_path") == EXPECTED_ASSIGNMENT,
+        hypes.get("heter", {}).get("assignment_path") == lock["final_assignment"]["path"],
         "{} FINAL runtime assignment mismatch".format(gate),
     )
     require(

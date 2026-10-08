@@ -23,7 +23,7 @@ cav_lidar_range: &cav_lidar [-102.4, -102.4, -3, 102.4, 102.4, 1]
 add_data_extension: ['bev_visibility.png']
 
 heter:
-  assignment_path: "opencood/modality_assign/opv2v_4modality_in_order.json"
+  assignment_path: "opencood/modality_assign/opv2v_4modality.json"
   ego_modality: &ego_modality "m3"
   lidar_channels_dict:
     m3: 32

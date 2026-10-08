@@ -23,7 +23,7 @@ add_data_extension: ['bev_visibility.png']
 
 
 heter:
-  assignment_path: "opencood/modality_assign/opv2v_4modality_in_order.json"
+  assignment_path: "opencood/modality_assign/opv2v_4modality.json"
   ego_modality: &ego_modality "m4"
   mapping_dict:
     m1: m4
