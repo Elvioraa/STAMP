@@ -1,6 +1,6 @@
 schema_version: 2
 protocol_name: STAMP_DOMA_V2R2
-status: smoke_only_unresolved_formal_protocol
+status: formal_inference_protocol_confirmed_pending_training
 
 stamp_commit:
   status: confirmed
@@ -49,14 +49,14 @@ test_manifest_sha256:
   value: null
 
 effective_detection_range:
-  status: unresolved
-  source: pending_server_run_artifact
-  value: null
+  status: confirmed_from_doma_v2_r2_final_artifacts
+  source: DOMA_V2_R2_2GPU_LR1P414_SEED303/m2lr0p0012_m3lr0p0030_m4lr0p0017--final-result
+  value: [-204.8, -102.4, -3, 204.8, 102.4, 1]
 
 effective_communication_range:
-  status: unresolved
-  source: pending_server_run_artifact
-  value: null
+  status: confirmed_from_doma_v2_r2_final_artifacts
+  source: DOMA_V2_R2_2GPU_LR1P414_SEED303/m2lr0p0012_m3lr0p0030_m4lr0p0017--final-result
+  value: 180
 
 gt_mode:
   status: confirmed_from_source

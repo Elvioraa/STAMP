@@ -15,6 +15,7 @@ For Intermediate Fusion, we will switch to IntermediateHeterinferFusionDataset
 """
 
 import argparse
+import json
 import os
 import time
 from typing import OrderedDict
@@ -30,6 +31,9 @@ from opencood.utils import eval_utils
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+FORMAL_COMM_RANGE = 180
+RUNTIME_PROTOCOL_MARKER = "STAMP_DOMA_RUNTIME_PROTOCOL="
 
 
 
@@ -58,6 +62,142 @@ def test_parser():
     return opt
 
 
+def _apply_inference_range(hypes, range_argument):
+    """Apply the CLI range and refresh all range-derived YAML parameters."""
+    range_parts = range_argument.split(',')
+    if len(range_parts) != 2:
+        raise ValueError('--range must contain exactly two comma-separated extents')
+    x_extent, y_extent = [float(value) for value in range_parts]
+    if x_extent <= 0 or y_extent <= 0:
+        raise ValueError('--range extents must be positive')
+
+    fallback_range = hypes.get('cav_lidar_range')
+    postprocess_range = hypes.get('postprocess', {}).get('anchor_args', {}).get('cav_lidar_range')
+    source_range = postprocess_range if postprocess_range is not None else fallback_range
+    if not isinstance(source_range, (list, tuple)) or len(source_range) != 6:
+        raise ValueError('resolved hypes do not provide a six-value cav_lidar_range')
+
+    new_cav_range = [
+        -x_extent,
+        -y_extent,
+        source_range[2],
+        x_extent,
+        y_extent,
+        source_range[5],
+    ]
+    hypes = update_dict(hypes, {
+        'cav_lidar_range': new_cav_range,
+        'lidar_range': new_cav_range,
+        'gt_range': new_cav_range,
+    })
+    hypes = update_dict(hypes, {
+        'mapping_dict': {
+            'm1': 'm1',
+            'm2': 'm2',
+            'm3': 'm3',
+            'm4': 'm4',
+        }
+    })
+
+    yaml_utils_lib = importlib.import_module('opencood.hypes_yaml.yaml_utils')
+    if 'yaml_parser' in hypes:
+        parser_func = getattr(yaml_utils_lib, hypes['yaml_parser'])
+        hypes = parser_func(hypes)
+    elif 'yaml_parsers' in hypes:
+        for modality_name, parser_names in hypes['yaml_parsers'].items():
+            if isinstance(parser_names, str):
+                parser_names = [parser_names]
+            for parser_name in parser_names:
+                parser_func = getattr(yaml_utils_lib, parser_name)
+                modality_setting = parser_func(hypes['heter']['modality_setting'][modality_name])
+                hypes['heter']['modality_setting'][modality_name] = modality_setting
+                if parser_name == 'load_bev_params':
+                    hypes['model']['args'][modality_name]['encoder_args']['geometry_param'] = \
+                        modality_setting['preprocess']['geometry_param']
+
+    return hypes, new_cav_range
+
+
+def _prepare_inference_hypes(hypes, fusion_method):
+    """Apply only the exact dataset-name conversions required for inference."""
+    if fusion_method == 'intermediate':
+        core_method = hypes['fusion']['core_method']
+        if core_method == 'intermediateheter':
+            hypes['fusion']['core_method'] = 'intermediateheterinfer'
+
+    hypes['comm_range'] = FORMAL_COMM_RANGE
+
+    assignment_path = hypes['heter']['assignment_path']
+    assignment_root, assignment_extension = os.path.splitext(assignment_path)
+    if assignment_extension != '.json':
+        raise ValueError('assignment_path must be a JSON file: %s' % assignment_path)
+    if not assignment_root.endswith('_in_order'):
+        hypes['heter']['assignment_path'] = assignment_root + '_in_order' + assignment_extension
+
+    return hypes
+
+
+def _runtime_protocol_snapshot(hypes, detection_range, use_cav, dataset=None):
+    """Validate and expose the protocol stored by the initialized dataset."""
+    range_keys = {'cav_lidar_range', 'lidar_range', 'gt_range'}
+    observed_ranges = []
+
+    def collect(node, path='hypes'):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child_path = '%s.%s' % (path, key)
+                if key in range_keys:
+                    observed_ranges.append((child_path, value))
+                collect(value, child_path)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                collect(value, '%s[%d]' % (path, index))
+
+    collect(hypes)
+    if not observed_ranges:
+        raise RuntimeError('no detection-range fields found in resolved inference hypes')
+
+    expected_range = [float(value) for value in detection_range]
+    mismatches = []
+    for path, value in observed_ranges:
+        try:
+            actual_range = [float(item) for item in value]
+        except (TypeError, ValueError):
+            mismatches.append((path, value))
+            continue
+        if actual_range != expected_range:
+            mismatches.append((path, value))
+    if mismatches:
+        raise RuntimeError('resolved detection-range mismatch: %s' % mismatches[:8])
+
+    if float(hypes.get('comm_range')) != float(FORMAL_COMM_RANGE):
+        raise RuntimeError('resolved communication range is not 180 m')
+    if hypes.get('validate_dir') != hypes.get('test_dir'):
+        raise RuntimeError('resolved inference split is not test_dir')
+    assignment_path = hypes.get('heter', {}).get('assignment_path', '')
+    if not assignment_path.endswith('_in_order.json'):
+        raise RuntimeError('resolved assignment is not an in-order JSON')
+    if dataset is not None:
+        if getattr(dataset, 'root_dir', None) != hypes['test_dir']:
+            raise RuntimeError('initialized dataset root_dir is not the formal test split')
+        if int(getattr(dataset, 'use_cav', -1)) != int(use_cav):
+            raise RuntimeError('initialized dataset use_cav does not match the requested prefix')
+
+    snapshot = {
+        'assignment_path': assignment_path,
+        'comm_range': hypes['comm_range'],
+        'detection_range': expected_range,
+        'fusion_core_method': hypes['fusion']['core_method'],
+        'dataset_root_dir': getattr(dataset, 'root_dir', None),
+        'dataset_use_cav': getattr(dataset, 'use_cav', None),
+        'test_dir': hypes['test_dir'],
+        'use_cav': int(use_cav),
+        'validate_dir': hypes['validate_dir'],
+    }
+    print(RUNTIME_PROTOCOL_MARKER + json.dumps(snapshot, sort_keys=True))
+    return snapshot
+
+
 def main():
     opt = test_parser()
 
@@ -69,35 +209,8 @@ def main():
         # hypes['heter']['lidar_channels'] = 16
         # opt.note += "_16ch"
 
-        x_min, x_max = -eval(opt.range.split(',')[0]), eval(opt.range.split(',')[0])
-        y_min, y_max = -eval(opt.range.split(',')[1]), eval(opt.range.split(',')[1])
-        opt.note += f"_{x_max}_{y_max}"
-
-        new_cav_range = [x_min, y_min, hypes['postprocess']['anchor_args']['cav_lidar_range'][2], \
-                            x_max, y_max, hypes['postprocess']['anchor_args']['cav_lidar_range'][5]]
-
-        # replace all appearance
-        hypes = update_dict(hypes, {
-            "cav_lidar_range": new_cav_range,
-            "lidar_range": new_cav_range,
-            "gt_range": new_cav_range
-        })
-
-        hypes = update_dict(hypes, {
-            "mapping_dict": {
-                "m1": "m1",
-                "m2": "m2",
-                "m3": "m3",
-                "m4": "m4"
-            }
-        })
-
-        # reload anchor
-        yaml_utils_lib = importlib.import_module("opencood.hypes_yaml.yaml_utils")
-        for name, func in yaml_utils_lib.__dict__.items():
-            if name == hypes["yaml_parser"]:
-                parser_func = func
-        hypes = parser_func(hypes)
+        hypes, new_cav_range = _apply_inference_range(hypes, opt.range)
+        opt.note += f"_{new_cav_range[3]}_{new_cav_range[4]}"
 
         
     
@@ -133,10 +246,7 @@ def main():
     # setting noise
     np.random.seed(303)
 
-    if opt.fusion_method == 'intermediate':
-        hypes['fusion']['core_method'] += 'infer' 
-    hypes['comm_range'] = 180
-    hypes['heter']['assignment_path'] = hypes['heter']['assignment_path'].replace(".json", "_in_order.json")
+    hypes = _prepare_inference_hypes(hypes, opt.fusion_method)
     hypes = update_dict(hypes, {
             "ego_modality": 'm1'
         })
@@ -167,6 +277,12 @@ def main():
         # build dataset for each noise setting
         print('Dataset Building')
         opencood_dataset = build_dataset(hypes, visualize=True, train=False)
+        _runtime_protocol_snapshot(
+            opencood_dataset.params,
+            new_cav_range,
+            use_cav,
+            dataset=opencood_dataset,
+        )
         # opencood_dataset_subset = Subset(opencood_dataset, range(1220,1260))
         # data_loader = DataLoader(opencood_dataset_subset,
         data_loader = DataLoader(opencood_dataset,
