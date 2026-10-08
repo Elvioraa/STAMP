@@ -471,7 +471,8 @@ def _assert_loaded_values(model, checkpoint, matched_keys, label, torch):
     mismatched = [
         key
         for key in matched_keys
-        if not torch.equal(model_state[key].detach().cpu(), checkpoint[key].detach().cpu())
+        if not key.endswith("num_batches_tracked")
+        and not torch.equal(model_state[key].detach().cpu(), checkpoint[key].detach().cpu())
     ]
     if mismatched:
         raise Gate6Error("%s parent keys were not loaded: %s" % (label, mismatched[:8]))
