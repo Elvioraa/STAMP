@@ -396,7 +396,7 @@ def main():
                     infer_result.update({"cav_box_np": cav_box_np, \
                                         "agent_modality_list": agent_modality_list})
 
-                if (i % opt.save_vis_interval == 0) and (pred_box_tensor is not None or gt_box_tensor is not None):
+                if os.environ.get('STAMP_SKIP_BEV_VIS') != '1' and (i % opt.save_vis_interval == 0) and (pred_box_tensor is not None or gt_box_tensor is not None):
                     vis_save_path_root = os.path.join(opt.model_dir, f'vis_{infer_info}')
                     if not os.path.exists(vis_save_path_root):
                         os.makedirs(vis_save_path_root)
@@ -405,7 +405,7 @@ def main():
                     simple_vis.visualize(infer_result,
                                         batch_data['ego'][
                                             'origin_lidar'][0],
-                                        hypes['postprocess']['gt_range'],
+                                        new_cav_range,
                                         vis_save_path,
                                         method='bev',
                                         left_hand=left_hand)
