@@ -15,6 +15,7 @@ For Intermediate Fusion, we will switch to IntermediateHeterinferFusionDataset
 """
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -137,6 +138,19 @@ def _prepare_inference_hypes(hypes, fusion_method):
     return hypes
 
 
+def _inference_lidar_configs(hypes, use_cav, lidar_degrade=False):
+    """V2XSet uses its original PCDs, not OPV2V-H channel variants."""
+    dataset_name = hypes['fusion']['dataset'].lower()
+    if dataset_name == 'v2xset':
+        if lidar_degrade or hypes['heter'].get('lidar_channels_dict'):
+            raise ValueError('V2XSet requires raw PCDs; channel overrides are forbidden')
+        return [(value, None) for value in use_cav]
+    if lidar_degrade:
+        return [(4, {'m1': 32, 'm3': 16}), (4, {'m1': 16, 'm3': 16})]
+    lidar_config = {'m3': 32} if dataset_name == 'opv2v' else None
+    return [(value, lidar_config) for value in use_cav]
+
+
 def _runtime_protocol_snapshot(hypes, detection_range, use_cav, dataset=None):
     """Validate and expose the protocol stored by the initialized dataset."""
     range_keys = {'cav_lidar_range', 'lidar_range', 'gt_range'}
@@ -251,22 +265,9 @@ def main():
             "ego_modality": 'm1'
         })
     
-    if opt.lidar_degrade:
-        lidar_dict1 = {
-            "m1": 32,
-            "m3": 16
-        }
-        lidar_dict2 = {
-            "m1": 16,
-            "m3": 16
-        }
-        opt.use_cav = "[4]"
-        use_cav_and_lidar_config_pair = [(4, lidar_dict1), (4, lidar_dict2)]
-    else:
-        lidar_dict0 = {
-            'm3': 32
-        }
-        use_cav_and_lidar_config_pair = [(x, lidar_dict0) for x in eval(opt.use_cav)]
+    use_cav_and_lidar_config_pair = _inference_lidar_configs(
+        hypes, json.loads(opt.use_cav), opt.lidar_degrade
+    )
 
     for (use_cav, lidar_config) in use_cav_and_lidar_config_pair:
         hypes['use_cav'] = use_cav
@@ -300,6 +301,9 @@ def main():
 
         
         infer_info = opt.fusion_method + opt.note + f"_use_cav{use_cav}"
+        strict_v2xset = hypes.get('v2xset_reproducibility', False)
+        evaluated_samples = 0
+        gt_digest = hashlib.sha256()
         if opt.lidar_degrade:
             infer_info += f"_m1_{lidar_config['m1']}_m3_{lidar_config['m3']}"
 
@@ -331,6 +335,8 @@ def main():
 
             print(f"{infer_info}_{i}")
             if batch_data is None:
+                if strict_v2xset:
+                    raise RuntimeError('V2XSet formal inference returned an empty batch at %d' % i)
                 continue
             with torch.no_grad():
                 batch_data = train_utils.to_device(batch_data, device)
@@ -360,6 +366,11 @@ def main():
                 pred_box_tensor = infer_result['pred_box_tensor']
                 gt_box_tensor = infer_result['gt_box_tensor']
                 pred_score = infer_result['pred_score']
+                if strict_v2xset:
+                    # Order-independent, per-frame evaluator GT identity across CAV runs.
+                    boxes = [] if gt_box_tensor is None else gt_box_tensor.detach().cpu().numpy().reshape(-1, 24).tolist()
+                    gt_digest.update(json.dumps([i, sorted(boxes)], separators=(',', ':')).encode('utf8'))
+                    evaluated_samples += 1
                 
                 eval_utils.caluclate_tp_fp(pred_box_tensor,
                                         pred_score,
@@ -402,6 +413,14 @@ def main():
 
         _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                     opt.model_dir, infer_info)
+        if strict_v2xset:
+            if evaluated_samples != len(opencood_dataset) or evaluated_samples == 0:
+                raise RuntimeError('V2XSet formal evaluation did not cover every test frame')
+            print('STAMP_V2XSET_EVAL_COMPLETE=' + json.dumps({
+                'use_cav': int(use_cav), 'samples': evaluated_samples,
+                'gt_sha256': gt_digest.hexdigest(),
+                'eval_file': 'eval_' + infer_info + '.yaml',
+            }, sort_keys=True))
 
 
 

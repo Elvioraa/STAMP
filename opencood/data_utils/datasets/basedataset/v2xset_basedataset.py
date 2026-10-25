@@ -18,12 +18,14 @@ class V2XSETBaseDataset(OPV2VBaseDataset):
 
     def generate_object_center_camera(self, 
                                 cav_contents, 
-                                reference_lidar_pose):
+                                reference_lidar_pose,
+                                mask_outside_range=True):
         """
         Since V2XSet has not release bev_visiblity map, we can only filter object by range.
 
         Suppose the detection range of camera is within 50m
         """
         return self.post_processor.generate_object_center_v2xset_camera(
-            cav_contents, reference_lidar_pose
+            cav_contents, reference_lidar_pose,
+            mask_outside_range=mask_outside_range
         )

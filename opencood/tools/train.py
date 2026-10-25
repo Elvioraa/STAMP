@@ -31,6 +31,7 @@ from tensorboardX import SummaryWriter
 
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
+from opencood.tools import v2xset_reproducibility
 from opencood.data_utils.datasets import build_dataset
 
 from icecream import ic
@@ -49,6 +50,7 @@ def train_parser():
 def main():
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
+    v2xset_reproducibility.configure(hypes)
 
     print("Dataset Building")
     opencood_train_dataset = build_dataset(hypes, visualize=False, train=True)
@@ -63,6 +65,7 @@ def main():
         pin_memory=True,
         drop_last=True,
         prefetch_factor=2,
+        **v2xset_reproducibility.loader_kwargs(hypes),
     )
     val_loader = DataLoader(
         opencood_validate_dataset,
@@ -73,6 +76,7 @@ def main():
         pin_memory=True,
         drop_last=True,
         prefetch_factor=2,
+        **v2xset_reproducibility.loader_kwargs(hypes, validation=True),
     )
 
     print("Creating Model")

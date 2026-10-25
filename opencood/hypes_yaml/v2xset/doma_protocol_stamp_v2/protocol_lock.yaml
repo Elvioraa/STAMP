@@ -1,0 +1,44 @@
+schema_version: 2
+experiment: STAMP_DOMA_V2XSET
+reference_doma_commit: ef19dd01fbbbe35b82956b37c7b1a5b4bbf1bfd8
+stamp_base_commit: 042f2664d057b90150b1aab9e6a57adc767dee55
+seed: 303
+max_cav: 5
+splits: {train: dataset/V2XSET/train, validate: dataset/V2XSET/validate, test: dataset/V2XSET/test}
+camera_excluded_scenes: ['2021_09_09_13_20_58']
+training:
+  comm_range: 70
+  range_policy: original_STAMP_per_stage
+  epochs: {L1: 30, L2: 30, L3: 30, L4: 30, P0: 30, A1: 5, A2: 5, A3: 5, A4: 5}
+  checkpoint_selection: minimum_validation_loss
+  resume_policy: preserve_failed_attempt_and_restart_stage_from_original_parents
+  budget_note: STAMP_original_budget_not_equalized_to_HEAL_or_DOMA
+evaluation:
+  detection_range: [-204.8, -102.4, -3, 204.8, 102.4, 1]
+  cli_range: '204.8,102.4'
+  comm_range: 180
+  use_cav: [1, 2, 3, 4]
+  gt: all_valid_CAVs_before_input_prefix_cutoff
+  evaluator: opencood.utils.eval_utils
+  iou: [0.3, 0.5, 0.7]
+  ego: m1
+training_assignment:
+  path: opencood/modality_assign/v2xset_4modality.json
+  sha256:
+    status: confirmed
+    hash_scope: ordered_json_utf8_compact
+    value: a710fbc8ec33272a60429a34b0cb860a59a90020f386ace4de84a6bcb01f9a9d
+  raw_sha256_informational: e0419118774117cfc78266a1a34bbd409fe3d28839fbccb8d6e5e657b445b2f6
+final_assignment:
+  path: opencood/modality_assign/v2xset_4modality_in_order.json
+  sha256:
+    status: confirmed
+    hash_scope: ordered_json_utf8_compact
+    value: bc2720d78ae272d7330a7354f06b79a96b5beef3295cf52d1dccc34141387b8d
+  raw_sha256_informational: 52fea31dc9f18c67df7edf59ba2b90e1580856b2c23b8f325902ddc740a06cb6
+modalities:
+  m1: {official_id: m4, encoder: point_pillar, input: raw_V2XSET_PCD}
+  m2: {official_id: m1, encoder: lift_splat_shoot, camera_encoder: EfficientNet, input: four_RGB_cameras}
+  m3: {official_id: m2, encoder: second, input: raw_V2XSET_PCD, point_features: 4}
+  m4: {official_id: m3, encoder: lift_splat_shoot, camera_encoder: Resnet101, input: four_RGB_cameras}
+sensor_note: m1_and_m3_share_raw_sensor_data_no_independent_32_line_claim

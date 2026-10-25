@@ -21,6 +21,7 @@ from tensorboardX import SummaryWriter
 
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
+from opencood.tools import v2xset_reproducibility
 from opencood.data_utils.datasets import build_dataset
 
 from icecream import ic
@@ -41,6 +42,7 @@ def train_parser():
 def main():
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
+    v2xset_reproducibility.configure(hypes)
     multi_gpu_utils.init_distributed_mode(opt)
 
     print("Dataset Building")
@@ -50,6 +52,8 @@ def main():
     if opt.distributed:
         sampler_train = DistributedSampler(opencood_train_dataset)
         sampler_val = DistributedSampler(opencood_validate_dataset, shuffle=False)
+        if hypes.get("v2xset_reproducibility", False):
+            sampler_train.seed = sampler_val.seed = int(hypes["seed"])
 
         batch_sampler_train = torch.utils.data.BatchSampler(
             sampler_train, hypes["train_params"]["batch_size"], drop_last=True
@@ -60,6 +64,7 @@ def main():
             batch_sampler=batch_sampler_train,
             num_workers=16,
             collate_fn=opencood_train_dataset.collate_batch_train,
+            **v2xset_reproducibility.loader_kwargs(hypes),
         )
         val_loader = DataLoader(
             opencood_validate_dataset,
@@ -67,6 +72,7 @@ def main():
             num_workers=16,
             collate_fn=opencood_train_dataset.collate_batch_train,
             drop_last=False,
+            **v2xset_reproducibility.loader_kwargs(hypes, validation=True),
         )
     else:
         train_loader = DataLoader(
@@ -77,6 +83,7 @@ def main():
             shuffle=True,
             pin_memory=True,
             drop_last=True,
+            **v2xset_reproducibility.loader_kwargs(hypes),
         )
         val_loader = DataLoader(
             opencood_validate_dataset,
@@ -86,6 +93,7 @@ def main():
             shuffle=True,
             pin_memory=True,
             drop_last=True,
+            **v2xset_reproducibility.loader_kwargs(hypes, validation=True),
         )
 
     print("Creating Model")
